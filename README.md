@@ -1,73 +1,76 @@
 # GSO Scaffolds
 
-Example “scaffolds” for running AI coding agents on the [GSO benchmark](https://github.com/gso-bench/gso).
-
-A scaffold here is a thin integration layer that:
-- **runs an agent** (or an orchestrator) on GSO instances
-- **outputs patches** in a standard predictions format
-- **relies on the official GSO harness** for evaluation (testing +metrics + scoring)
-
-## Quickstart
-
-Install:
+Minimal infra and examples for running AI coding agents on the [GSO benchmark](https://github.com/gso-bench/gso), and producing **GSO-compatible predictions** for evaluation. To install, run:
 
 ```bash
-uv pip install gso-scaffolds
+uv pip install -e .
+
+# This installs two CLI entrypoints:
+# `gso-harbor` → `harbor/`
+# `gso-openhands` → `openhands_gso/`
 ```
 
-Run a scaffold to produce a `predictions.jsonl`, then evaluate it with the official GSO harness.
+## GSO Summary
 
-## Official evaluation (GSO harness)
+All scaffolds are expected to output a GSO-compatible JSONL with (at minimum):
 
-For details (outputs, metrics, Docker images, timeouts, etc.), see the official harness docs in the GSO repo:
-[**`gso-bench/gso` → `src/gso/harness/README.md`**](https://github.com/gso-bench/gso/tree/main/src/gso/harness).
-
-## Common predictions format
-
-All scaffolds should write JSONL with:
 - **`instance_id`**
-- **`model_patch`** (a `git diff`)
-- **`model_name_or_path`** (any identifier string)
+- **`model_patch`**: a `git diff` (patch to apply)
+- **`model_name_or_path`**: any identifier string
 
-## Included scaffolds
+Then, the GSO eval harness can evaluate the predictions (testing in dockerized environments, scoring, etc.) as shown in the [official GSO codebase](https://github.com/gso-bench/gso/tree/main/src/gso/harness). Please refer to the documentation there for more details on how to run the eval harness.
 
-### `harbor/` (run Harbor-compatible agents)
+## Scaffolds Overview
 
-Use this when you want to run agents through [Harbor](https://github.com/harbor-ai/harbor) (e.g. Codex, Claude Code, OpenHands, etc.), while keeping **GSO’s official evaluator** inside the task.
+This repo currently includes two practical integrations/examples:
 
-- Evaluation: bundled into the task run (the task’s `test.sh` runs the official GSO evaluator in-container).
+- **`harbor/`**: 
+  - convert GSO tasks into Harbor tasks
+  - run any Harbor-compatible agent (e.g. Codex, Claude Code, OpenHands, etc.)
+  - automatically runs the GSO eval harness in-container on the agent's patches and export GSO predictions and evaluation results
 
-Convert GSO → Harbor tasks:
+- **`openhands_gso/`**: 
+  - run any version of the OpenHands engine andexport GSO predictions
+  - *manually* run the official [GSO eval harness](https://github.com/gso-bench/gso/tree/main/src/gso/harness) on the agent's generated patches
 
-```bash
-uv run gso-harbor convert --dataset gso-bench/gso --output ./harbor-tasks/
-```
 
-Run an agent (example: oracle for validation):
+## Scaffold Details
 
-```bash
-harbor run --agent oracle --path ./harbor-tasks/<task-name> -n 1
-```
+### Harbor
 
-Export Harbor results → GSO predictions:
+Use this when you want to run agents through [Harbor](https://github.com/harbor-ai/harbor) (e.g. Codex, Claude Code, OpenHands, etc.) by converting GSO instances into Harbor tasks, then exporting Harbor job results back into a GSO `predictions.jsonl`.
 
-```bash
-uv run gso-harbor export-results --harbor-results ./jobs/<job-name> --output ./predictions/
-```
+1. Convert GSO → Harbor tasks:
 
-### `openhands_gso/` (run the OpenHands engine)
+    ```bash
+    gso-harbor convert --dataset gso-bench/gso --output ./harbor-tasks/
+    ```
 
-Use this when you want to run OpenHands directly (legacy-style), but **pin any OpenHands version** via a Git tag/release (no long-lived fork).
+2. Run with Harbor (example: oracle for validation):
 
-This scaffold generates patches and writes a `predictions.jsonl`. Evaluate/scoring is a separate step using the official GSO harness (link above).
+    ```bash
+    harbor run --agent oracle --path ./harbor-tasks/<task-name> -n 1
+    ```
 
-Pin an OpenHands version and see options:
+3. Export Harbor results → GSO predictions:
 
+    ```bash
+    gso-harbor export-results --harbor-results ./jobs/<job-name> --output ./predictions/
+    ```
+
+For more on the Harbor task layout, see `harbor/README.md`.
+
+
+### OpenHands
+
+Use this when you want to run OpenHands directly, but still be able to **pin any OpenHands version** via Git tags/releases. For instance, you may want to fork OpenHands and add custom features. This should also prove as a useful example for other custom agents.
+
+Example: pin OpenHands v1.3.0
 ```bash
 uv run \
-  --project . \
   --with "openhands-ai @ git+https://github.com/All-Hands-AI/OpenHands.git@v1.3.0" \
-  python -m openhands_gso.run_infer --help
+  --project . \
+  gso-openhands --help
 ```
 
-For usage details (including the example `config.toml`), see `openhands_gso/README.md`.
+More usage details for OpenHands(including `config.toml`), see `openhands_gso/README.md`.
