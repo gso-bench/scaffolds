@@ -14,7 +14,13 @@ uv run \
 
 ## Run one task (no overwrites)
 
-Create a small `config.toml` with an `[llm.*]` group (OpenHands format):
+Copy the example config and edit it:
+
+```bash
+cp openhands_gso/config.example.toml ./config.toml
+```
+
+It’s an OpenHands-style `config.toml` with an `[llm.*]` group:
 
 ```toml
 [llm.test]
@@ -27,7 +33,7 @@ uv run \
   --with "openhands-ai @ git+https://github.com/All-Hands-AI/OpenHands.git@v1.3.0" \
   --project . \
   python -m openhands_gso.run_infer \
-    --llm-config llm.eval_sonnet_vertex_0-8 \
+    --llm-config llm.test \
     --config-toml ./config.toml \
     --dataset gso-bench/gso \
     --split test \
