@@ -5,7 +5,7 @@ Example “scaffolds” for running AI coding agents on the [GSO benchmark](http
 A scaffold here is a thin integration layer that:
 - **runs an agent** (or an orchestrator) on GSO instances
 - **outputs patches** in a standard predictions format
-- **relies on `gsobench`** for official evaluation (metrics + scoring)
+- **relies on the official GSO harness** for evaluation (testing +metrics + scoring)
 
 ## Quickstart
 
@@ -19,25 +19,23 @@ Run a scaffold to produce a `predictions.jsonl`, then evaluate it with the offic
 
 ## Official evaluation (GSO harness)
 
-```bash
-git clone --recursive https://github.com/gso-bench/gso.git
-cd gso
-uv venv && source .venv/bin/activate
-uv sync
+For details (outputs, metrics, Docker images, timeouts, etc.), see the official harness docs in the GSO repo:
+[**`gso-bench/gso` → `src/gso/harness/README.md`**](https://github.com/gso-bench/gso/tree/main/src/gso/harness).
 
-# Evaluate Opt@K (use k=1 for a single predictions file)
-uv run src/gso/harness/opt_at_k.py \
-  --model my-system \
-  --prediction_paths /path/to/predictions.jsonl \
-  --run_id my-run \
-  --k 1
-```
+## Common predictions format
+
+All scaffolds should write JSONL with:
+- **`instance_id`**
+- **`model_patch`** (a `git diff`)
+- **`model_name_or_path`** (any identifier string)
 
 ## Included scaffolds
 
 ### `harbor/` (run Harbor-compatible agents)
 
 Use this when you want to run agents through [Harbor](https://github.com/harbor-ai/harbor) (e.g. Codex, Claude Code, OpenHands, etc.), while keeping **GSO’s official evaluator** inside the task.
+
+- Evaluation: bundled into the task run (the task’s `test.sh` runs the official GSO evaluator in-container).
 
 Convert GSO → Harbor tasks:
 
@@ -61,6 +59,8 @@ uv run gso-harbor export-results --harbor-results ./jobs/<job-name> --output ./p
 
 Use this when you want to run OpenHands directly (legacy-style), but **pin any OpenHands version** via a Git tag/release (no long-lived fork).
 
+This scaffold generates patches and writes a `predictions.jsonl`. Evaluate/scoring is a separate step using the official GSO harness (link above).
+
 Pin an OpenHands version and see options:
 
 ```bash
@@ -71,11 +71,3 @@ uv run \
 ```
 
 For usage details (including the example `config.toml`), see `openhands_gso/README.md`.
-
-## Predictions format
-
-All scaffolds are expected to write JSONL with (at minimum):
-- **`instance_id`**
-- **`model_patch`** (a `git diff`)
-
-Then `gsobench` is responsible for evaluation/scoring.
