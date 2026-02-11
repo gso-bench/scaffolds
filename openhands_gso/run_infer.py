@@ -2,12 +2,7 @@
 """
 OpenHands runner for GSO.
 
-Architecture matches the original OpenHands eval infra (evaluation/utils/shared.py):
-  - multiprocessing.Pool + imap_unordered
-  - SIGALRM per-instance timeout (3h)
-  - Retry wrapper (3 retries)
-  - runtime.close() in finally, result built after
-  - Main process writes output.jsonl from imap_unordered results
+Produces patches using OpenHands, supports parallel workers and resume.
 """
 
 from __future__ import annotations
@@ -37,12 +32,12 @@ from openhands_gso.helpers import (
     trajectory_path_for_instance,
 )
 
-TIMEOUT_SECONDS = 3 * 60 * 60  # 3 hours per instance (same as original)
+TIMEOUT_SECONDS = 3 * 60 * 60  # 3 hours per instance
 MAX_RETRIES = 3
 
 
 # ---------------------------------------------------------------------------
-# Timeout (matches evaluation/utils/shared.py)
+# Timeout
 # ---------------------------------------------------------------------------
 
 class _EvalTimeout(Exception):
@@ -115,7 +110,7 @@ def _build_instruction(instance: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Runtime setup (matches original initialize_runtime)
+# Runtime setup
 # ---------------------------------------------------------------------------
 
 def _initialize_runtime(mod, runtime, instance):
@@ -155,7 +150,7 @@ def _initialize_runtime(mod, runtime, instance):
 
 
 # ---------------------------------------------------------------------------
-# Patch extraction (matches original complete_runtime)
+# Patch extraction
 # ---------------------------------------------------------------------------
 
 def _extract_patch(mod, runtime, instance):
@@ -218,7 +213,7 @@ def _extract_patch(mod, runtime, instance):
 
 
 # ---------------------------------------------------------------------------
-# Worker: process one instance (matches original process_instance)
+# Worker
 # ---------------------------------------------------------------------------
 
 def _process_instance(instance: dict, args_dict: dict) -> dict:
@@ -283,7 +278,7 @@ def _process_instance(instance: dict, args_dict: dict) -> dict:
     finally:
         runtime.close()
 
-    # Build result (after close, matching original structure)
+    # Build result
     history = [mod["event_to_dict"](event) for event in state.history] if state else None
     metrics = state.metrics.get() if state and getattr(state, "metrics", None) else {}
     model_name = getattr(llm_config, "model", "openhands")
@@ -307,7 +302,7 @@ def _process_instance(instance: dict, args_dict: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Wrapper: timeout + retries (matches original _process_instance_wrapper)
+# Wrapper: timeout + retries
 # ---------------------------------------------------------------------------
 
 def _make_error_record(instance: dict, error: str) -> dict:

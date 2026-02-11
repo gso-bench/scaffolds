@@ -23,7 +23,7 @@ def get_gso_workspace_dir_name(instance: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Binary patch utilities (ported from SWE-bench)
+# Binary patch utilities
 # ---------------------------------------------------------------------------
 
 def remove_binary_diffs(patch_text: str) -> str:
@@ -84,7 +84,7 @@ def is_fatal_evaluation_error(error: str | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Fake user response (matches codeact_user_response from OpenHands eval)
+# Fake user response
 # ---------------------------------------------------------------------------
 
 def codeact_user_response(state) -> str:
