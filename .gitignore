@@ -59,6 +59,3 @@ Thumbs.db
 config.toml
 *.log
 run.sh
-
-# Reference clones (not part of this repo)
-_gsoeval_openhands/
