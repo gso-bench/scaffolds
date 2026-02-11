@@ -1,36 +1,16 @@
 # OpenHands GSO Runner
 
-This runs the OpenHands *engine* on GSO to produce patches, while letting you pin
-**any OpenHands version** via GitHub tags/releases (no fork required).
+Runs the OpenHands engine on GSO to produce patches. Pin any OpenHands version via `uv run --with`.
 
-## Pick an OpenHands version (Git tag / release)
-
-```bash
-uv run \
-  --with "openhands-ai @ git+https://github.com/All-Hands-AI/OpenHands.git@v1.3.0" \
-  --project . \
-  python -m openhands_gso.run_infer --help
-```
-
-## Run one task (no overwrites)
-
-Copy the example config and edit it:
+## Usage
 
 ```bash
+# copy and edit config
 cp openhands_gso/config.example.toml ./config.toml
-```
 
-It’s an OpenHands-style `config.toml` with an `[llm.*]` group:
-
-```toml
-[llm.test]
-model = "gpt-4o-mini"
-temperature = 0.0
-```
-
-```bash
+# run one instance
 uv run \
-  --with "openhands-ai @ git+https://github.com/All-Hands-AI/OpenHands.git@v1.3.0" \
+  --with "openhands-ai @ git+https://github.com/OpenHands/OpenHands.git@1.3.0" \
   --project . \
   python -m openhands_gso.run_infer \
     --llm-config llm.test \
@@ -40,14 +20,16 @@ uv run \
     --eval-n-limit 1
 ```
 
-## Outputs
+Options: `--num-workers N` for parallelism, `--output-dir` for resume (skips already-done instances).
 
-- Default: `./openhands-runs/<timestamp>/output.jsonl`
-- If you pass `--output-dir`, it refuses to overwrite existing directories.
-
-## Evaluate
+## Retry for rate-limited APIs
 
 ```bash
-uv pip install gsobench
-gso evaluate --predictions ./openhands-runs/<timestamp>/output.jsonl --dataset gso-bench/gso
+until uv run --with "..." --project . python -m openhands_gso.run_infer \
+  --llm-config llm.opus-4-6 --config-toml ./config.toml \
+  --num-workers 5 --max-iterations 100 \
+  --output-dir ./openhands-runs/my-run; do
+  sleep 20
+done
+docker container prune -f
 ```
