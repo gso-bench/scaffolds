@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import multiprocessing as mp
 import os
 import signal
@@ -24,10 +25,12 @@ from openhands_gso.helpers import (
     get_gso_workspace_dir_name,
     is_fatal_evaluation_error,
     load_done_ids,
+    process_git_patch,
     rebuild_predictions_from_output,
     remove_binary_diffs,
     remove_binary_files_from_git_cmd,
     require_openhands,
+    reset_logger_for_multiprocessing,
     resolve_output_dir,
     trajectory_path_for_instance,
 )
@@ -142,11 +145,13 @@ def _initialize_runtime(mod, runtime, instance):
          f"Failed to set up workspace /workspace/{workspace_dir}")
     _run(f"cd /workspace/{workspace_dir}", f"Failed to cd to /workspace/{workspace_dir}")
     _run("source .venv/bin/activate", "Failed to activate .venv")
-    obs = _run("which python")
-    if isinstance(obs, CmdOutputObservation):
-        content = getattr(obs, "content", "")
-        if "testbed" not in content and workspace_dir not in content:
-            logger.warning(f"Python not from expected location: {content}")
+    obs = _run("which python", "Failed to run 'which python'")
+    if not isinstance(obs, CmdOutputObservation) or obs.exit_code != 0:
+        raise RuntimeError(f"'which python' failed: {obs}")
+    if "testbed" not in getattr(obs, "content", ""):
+        raise RuntimeError(
+            f"Expected to find python interpreter from testbed, but got: {obs}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +227,10 @@ def _process_instance(instance: dict, args_dict: dict) -> dict:
     logger = mod["logger"]
     instance_id = instance["instance_id"]
 
+    # Set up per-instance logging so parallel workers don't clobber each other
+    log_dir = os.path.join(args_dict["output_dir"], "infer_logs")
+    reset_logger_for_multiprocessing(logger, instance_id, log_dir)
+
     llm_config = mod["get_llm_config_arg"](args_dict["llm_config"], args_dict["config_toml"])
     if llm_config is None:
         raise RuntimeError(f'LLM config "{args_dict["llm_config"]}" not found')
@@ -235,7 +244,20 @@ def _process_instance(instance: dict, args_dict: dict) -> dict:
     if str(getattr(llm_config, "model", "")).startswith("vertex_ai/claude"):
         llm_config.top_p = None
 
-    sandbox_config = mod["SandboxConfig"](use_host_network=False, timeout=20 * 60)
+    # --- Sandbox config: mirrors get_default_sandbox_config_for_eval() + GSO overrides ---
+    sandbox_config = mod["SandboxConfig"](
+        use_host_network=False,
+        # default is 300; GSO overrides to 20 min for long rebuilds/tests
+        timeout=20 * 60,
+        api_key=os.environ.get("ALLHANDS_API_KEY", None),
+        runtime_startup_env_vars={"NO_CHANGE_TIMEOUT_SECONDS": "30"},
+        remote_runtime_api_url=os.environ.get("SANDBOX_REMOTE_RUNTIME_API_URL"),
+        keep_runtime_alive=False,
+        remote_runtime_init_timeout=3600,
+        remote_runtime_api_timeout=120,
+        remote_runtime_enable_retries=True,
+        remote_runtime_class="sysbox",
+    )
     sandbox_config.base_container_image = get_gso_instance_docker_image(instance_id)
     sandbox_config.enable_auto_lint = True
     sandbox_config.platform = "linux/amd64"
@@ -256,6 +278,7 @@ def _process_instance(instance: dict, args_dict: dict) -> dict:
     config.set_agent_config(mod["AgentConfig"](
         enable_jupyter=False, enable_browsing=False,
         enable_llm_editor=False, enable_prompt_extensions=False,
+        condenser=mod["NoOpCondenserConfig"](),
     ))
 
     runtime = mod["create_runtime"](config)
@@ -281,7 +304,15 @@ def _process_instance(instance: dict, args_dict: dict) -> dict:
     # Build result
     history = [mod["event_to_dict"](event) for event in state.history] if state else None
     metrics = state.metrics.get() if state and getattr(state, "metrics", None) else {}
+    # Add condenser metadata to metrics
+    try:
+        metrics["condenser"] = mod["get_condensation_metadata"](state)
+    except Exception:
+        pass
     model_name = getattr(llm_config, "model", "openhands")
+
+    # Clean the patch (strip control chars, normalize line endings)
+    cleaned_patch = process_git_patch(git_patch)
 
     return {
         "instance_id": instance_id,
@@ -296,7 +327,7 @@ def _process_instance(instance: dict, args_dict: dict) -> dict:
         "metrics": metrics,
         "error": state.last_error if state and getattr(state, "last_error", None) else None,
         "instance": instance,
-        "model_patch": git_patch,
+        "model_patch": cleaned_patch,
         "model_name_or_path": model_name,
     }
 
@@ -335,6 +366,7 @@ def _worker_wrapper(args):
             if attempt == MAX_RETRIES:
                 return _make_error_record(instance, f"Failed after {MAX_RETRIES} retries: {e}")
             print(f"[{instance_id}] attempt {attempt + 1} failed: {e}, retrying...")
+            time.sleep(5)
             continue
 
     return _make_error_record(instance, "Unexpected: exhausted retries")
@@ -370,7 +402,7 @@ def main() -> int:
         wanted = set(args.instance_ids)
         ds = ds.filter(lambda x: x["instance_id"] in wanted)
     if args.eval_n_limit:
-        ds = ds.select(range(min(args.eval_n_limit, len(ds))))
+        ds = ds.shuffle(seed=42).select(range(min(args.eval_n_limit, len(ds))))
 
     if resume:
         rebuild_predictions_from_output(output_file, predictions_file)

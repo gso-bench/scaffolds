@@ -61,6 +61,23 @@ def remove_binary_files_from_git_cmd() -> str:
     )
 
 
+def process_git_patch(patch: str) -> str:
+    """Clean a git patch: strip control characters, normalize line endings."""
+    if not isinstance(patch, str):
+        return ""
+    if not patch.strip():
+        return ""
+    patch = patch.replace("\r\n", "\n")
+    # Strip any garbage/control characters before the first real diff line
+    lines = patch.split("\n")
+    for i, line in enumerate(lines):
+        if line.startswith("diff --git"):
+            patch = "\n".join(lines[i:])
+            break
+    patch = patch.rstrip() + "\n"  # ensure trailing newline
+    return patch
+
+
 # ---------------------------------------------------------------------------
 # Fatal error detection
 # ---------------------------------------------------------------------------
@@ -121,6 +138,54 @@ def trajectory_path_for_instance(traj_dir: str, instance_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Per-instance logging (multiprocessing)
+# ---------------------------------------------------------------------------
+
+def reset_logger_for_multiprocessing(logger, instance_id: str, log_dir: str) -> None:
+    """Reset the logger for multiprocessing.
+
+    Save logs to a separate file for each process, instead of trying to write
+    to the same file/console from multiple processes.
+    """
+    import logging
+
+    log_file = os.path.join(log_dir, f"instance_{instance_id}.log")
+
+    # Remove all existing handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+
+    # Console handler — one info line, then WARNING+ only
+    try:
+        from openhands.core.logger import get_console_handler
+        console_handler = get_console_handler(log_level=logging.INFO)
+    except ImportError:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(
+        logging.Formatter(
+            f"Instance {instance_id} - %(asctime)s - %(levelname)s - %(message)s"
+        )
+    )
+    logger.addHandler(console_handler)
+    logger.info(
+        f"Starting evaluation for instance {instance_id}.\n"
+        f'Hint: run "tail -f {log_file}" to see live logs in a separate shell'
+    )
+    # Only log WARNING or higher to console after the initial message
+    console_handler.setLevel(logging.WARNING)
+
+    # File handler — INFO and above
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    )
+    file_handler.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+
+
+# ---------------------------------------------------------------------------
 # OpenHands compatibility patch
 # ---------------------------------------------------------------------------
 
@@ -166,6 +231,7 @@ def require_openhands() -> dict:
     """Import OpenHands modules lazily. Raises SystemExit if not installed."""
     try:
         from openhands.core.config import AgentConfig, OpenHandsConfig, SandboxConfig, get_llm_config_arg
+        from openhands.core.config.condenser_config import NoOpCondenserConfig
         from openhands.core.main import create_runtime, run_controller
         from openhands.events.action import CmdRunAction, FileReadAction, MessageAction
         from openhands.events.observation import (
@@ -176,6 +242,7 @@ def require_openhands() -> dict:
         from openhands.events.serialization.event import event_to_dict
         from openhands.utils.async_utils import call_async_from_sync
         from openhands.core.logger import openhands_logger as logger
+        from openhands.memory.condenser import get_condensation_metadata
 
         patch_openhands_skills_dir()
 
@@ -183,6 +250,7 @@ def require_openhands() -> dict:
             "AgentConfig": AgentConfig,
             "OpenHandsConfig": OpenHandsConfig,
             "SandboxConfig": SandboxConfig,
+            "NoOpCondenserConfig": NoOpCondenserConfig,
             "get_llm_config_arg": get_llm_config_arg,
             "create_runtime": create_runtime,
             "run_controller": run_controller,
@@ -194,6 +262,7 @@ def require_openhands() -> dict:
             "FileReadObservation": FileReadObservation,
             "event_to_dict": event_to_dict,
             "call_async_from_sync": call_async_from_sync,
+            "get_condensation_metadata": get_condensation_metadata,
             "logger": logger,
         }
     except Exception as e:  # noqa: BLE001
