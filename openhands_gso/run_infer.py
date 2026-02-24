@@ -395,7 +395,7 @@ def main() -> int:
 
     output_dir, resume = resolve_output_dir(args.output_dir, args.eval_note)
     output_file = output_dir / "output.jsonl"
-    predictions_file = output_dir / "predictions.jsonl"
+    predictions_file = output_dir / "output.gso.jsonl"
 
     ds = load_dataset(args.dataset, split=args.split)
     if args.instance_ids:

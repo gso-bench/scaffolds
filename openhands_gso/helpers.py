@@ -312,7 +312,7 @@ def load_done_ids(output_file: Path) -> set[str]:
 # ---------------------------------------------------------------------------
 
 def rebuild_predictions_from_output(output_file: Path, predictions_file: Path) -> None:
-    """Ensure predictions.jsonl mirrors output.jsonl records."""
+    """Ensure output.gso.jsonl mirrors output.jsonl records."""
     if not output_file.exists():
         return
     tmp_file = predictions_file.with_suffix(".jsonl.tmp")
