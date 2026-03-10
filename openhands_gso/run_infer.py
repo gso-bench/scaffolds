@@ -39,6 +39,32 @@ TIMEOUT_SECONDS = 3 * 60 * 60  # 3 hours per instance
 MAX_RETRIES = 3
 
 
+def _patch_litellm_gpt5_xhigh():
+    """Allow reasoning_effort='xhigh' for gpt-5.4 in litellm.
+
+    litellm < 1.83 only allowlists gpt-5.1-codex-max and gpt-5.2 for xhigh,
+    silently dropping the param for newer models when drop_params is True.
+    """
+    try:
+        from litellm.llms.openai.chat.gpt_5_transformation import OpenAIGPT5Config
+
+        orig = OpenAIGPT5Config.map_openai_params
+
+        def patched_map(self, non_default_params, optional_params, model, drop_params):
+            effort = non_default_params.get("reasoning_effort") or optional_params.get(
+                "reasoning_effort"
+            )
+            model_name = model.split("/")[-1]
+            # Temporarily pretend gpt-5.4 is gpt-5.2 so the original check passes
+            if effort == "xhigh" and model_name.startswith("gpt-5.4"):
+                return orig(self, non_default_params, optional_params, "gpt-5.2", drop_params)
+            return orig(self, non_default_params, optional_params, model, drop_params)
+
+        OpenAIGPT5Config.map_openai_params = patched_map
+    except (ImportError, AttributeError):
+        pass  # litellm version doesn't have this path; nothing to patch
+
+
 # ---------------------------------------------------------------------------
 # Timeout
 # ---------------------------------------------------------------------------
@@ -278,6 +304,7 @@ def _process_instance(instance: dict, args_dict: dict) -> dict:
     config.set_agent_config(mod["AgentConfig"](
         enable_jupyter=False, enable_browsing=False,
         enable_llm_editor=False, enable_prompt_extensions=False,
+        enable_plan_mode=False,
         condenser=mod["NoOpCondenserConfig"](),
     ))
 
@@ -377,6 +404,7 @@ def _worker_wrapper(args):
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    _patch_litellm_gpt5_xhigh()
     mod = require_openhands()
 
     parser = argparse.ArgumentParser(description="Run OpenHands on GSO to produce patches.")
