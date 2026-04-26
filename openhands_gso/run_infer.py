@@ -39,12 +39,10 @@ TIMEOUT_SECONDS = 3 * 60 * 60  # 3 hours per instance
 MAX_RETRIES = 3
 
 
-def _patch_litellm_gpt5_xhigh():
-    """Allow reasoning_effort='xhigh' for gpt-5.4 in litellm.
-
-    litellm < 1.83 only allowlists gpt-5.1-codex-max and gpt-5.2 for xhigh,
-    silently dropping the param for newer models when drop_params is True.
-    """
+def _patch_litellm():
+    """Apply litellm compatibility patches for newer model APIs."""
+    # 1. Allow reasoning_effort='xhigh' for gpt-5.4+
+    #    litellm < 1.83 only allowlists gpt-5.1-codex-max and gpt-5.2 for xhigh.
     try:
         from litellm.llms.openai.chat.gpt_5_transformation import OpenAIGPT5Config
 
@@ -55,14 +53,75 @@ def _patch_litellm_gpt5_xhigh():
                 "reasoning_effort"
             )
             model_name = model.split("/")[-1]
-            # Temporarily pretend gpt-5.4 is gpt-5.2 so the original check passes
             if effort == "xhigh" and model_name.startswith("gpt-5.4"):
                 return orig(self, non_default_params, optional_params, "gpt-5.2", drop_params)
             return orig(self, non_default_params, optional_params, model, drop_params)
 
         OpenAIGPT5Config.map_openai_params = patched_map
     except (ImportError, AttributeError):
-        pass  # litellm version doesn't have this path; nothing to patch
+        pass
+
+    # 2. Fix function_call_output format for gpt-5.5+
+    #    OpenAI requires function_call_output.output to be a plain string,
+    #    but litellm converts it to [{"type": "output_text", ...}].
+    try:
+        from litellm.completion_extras.litellm_responses_transformation.transformation import (
+            LiteLLMResponsesTransformationHandler,
+        )
+
+        _orig_convert = LiteLLMResponsesTransformationHandler.convert_chat_completion_messages_to_responses_api
+
+        def _patched_convert(self, messages):
+            input_items, instructions = _orig_convert(self, messages)
+            for item in input_items:
+                if item.get("type") == "function_call_output" and isinstance(item.get("output"), list):
+                    # Flatten [{"type": "output_text", "text": "..."}] → "..."
+                    texts = [o.get("text", "") for o in item["output"] if isinstance(o, dict)]
+                    item["output"] = "\n".join(texts) if texts else ""
+            return input_items, instructions
+
+        LiteLLMResponsesTransformationHandler.convert_chat_completion_messages_to_responses_api = _patched_convert
+    except (ImportError, AttributeError):
+        pass
+
+    # 3. Adaptive thinking for Claude Opus 4.6/4.7 on Vertex
+    #    Opus 4.7 requires thinking={"type":"adaptive"} + output_config.effort
+    #    and rejects manual budget_tokens. litellm 1.80.x only knows the old
+    #    API. Also strip the effort-2025-11-24 beta header which Vertex rejects.
+    try:
+        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+        AnthropicConfig._is_claude_opus_4_5 = lambda self, model: any(
+            x in model.lower()
+            for x in ("opus-4-5", "opus_4_5", "opus-4-6", "opus_4_6", "opus-4-7", "opus_4_7")
+        )
+        AnthropicConfig._map_reasoning_effort = staticmethod(
+            lambda reasoning_effort: {"type": "adaptive"}
+        )
+
+        # Strip the anthropic_beta field from Vertex requests entirely —
+        # Vertex's Anthropic wrapper doesn't accept any beta flags and returns
+        # 400 "invalid beta flag" if any are sent (incl. prompt-caching-* etc).
+        from litellm.llms.vertex_ai.vertex_ai_partner_models.anthropic.transformation import (
+            VertexAIAnthropicConfig,
+        )
+        _orig_xform = VertexAIAnthropicConfig.transform_request
+
+        def _patched_xform(self, *args, **kwargs):
+            data = _orig_xform(self, *args, **kwargs)
+            data.pop("anthropic_beta", None)
+            # Opus 4.7 deprecated temperature; strip it for compatibility.
+            model = kwargs.get("model") or (args[0] if args else "")
+            if "opus-4-7" in str(model).lower() or "opus_4_7" in str(model).lower():
+                data.pop("temperature", None)
+                data.pop("top_p", None)
+                data.pop("top_k", None)
+            return data
+
+        VertexAIAnthropicConfig.transform_request = _patched_xform
+    except (ImportError, AttributeError):
+        pass
+
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +463,7 @@ def _worker_wrapper(args):
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    _patch_litellm_gpt5_xhigh()
+    _patch_litellm()
     mod = require_openhands()
 
     parser = argparse.ArgumentParser(description="Run OpenHands on GSO to produce patches.")
