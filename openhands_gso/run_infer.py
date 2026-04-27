@@ -110,15 +110,62 @@ def _patch_litellm():
         def _patched_xform(self, *args, **kwargs):
             data = _orig_xform(self, *args, **kwargs)
             data.pop("anthropic_beta", None)
-            # Opus 4.7 deprecated temperature; strip it for compatibility.
-            model = kwargs.get("model") or (args[0] if args else "")
-            if "opus-4-7" in str(model).lower() or "opus_4_7" in str(model).lower():
+            # When thinking is enabled (or adaptive), Vertex Anthropic only
+            # accepts temperature=1; strip temperature/top_p/top_k so the
+            # request is accepted. Applies to any model with thinking config.
+            if data.get("thinking") or data.get("output_config"):
                 data.pop("temperature", None)
                 data.pop("top_p", None)
                 data.pop("top_k", None)
+
+            # Vertex's opus-4.6 endpoint hasn't rolled out adaptive thinking
+            # yet (rejects {"type":"adaptive"} with 400). Fall back to the
+            # deprecated {"type":"enabled","budget_tokens":N} format for 4.6
+            # only. Opus 4.7 keeps adaptive (it's the only mode it supports).
+            model = kwargs.get("model") or (args[0] if args else "")
+            model_lower = str(model).lower()
+            if (
+                ("opus-4-6" in model_lower or "opus_4_6" in model_lower)
+                and isinstance(data.get("thinking"), dict)
+                and data["thinking"].get("type") == "adaptive"
+            ):
+                # Map effort level → budget_tokens
+                effort = (data.get("output_config") or {}).get("effort", "high")
+                budget = {"low": 1024, "medium": 2048, "high": 4096}.get(effort, 4096)
+                data["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                data.pop("output_config", None)  # only valid with adaptive
             return data
 
         VertexAIAnthropicConfig.transform_request = _patched_xform
+    except (ImportError, AttributeError):
+        pass
+
+    # 4. Un-strip reasoning_effort for opus-4.6 in OpenHands.
+    #    OpenHands 1.6.0 hardcodes a strip-list (sonnet-4.5, haiku-4.5,
+    #    opus-4.6) that drops `reasoning_effort` before the litellm call.
+    #    We've fixed the root cause (temperature conflict) in patch #3, so
+    #    re-add reasoning_effort right before the LLM call.
+    try:
+        from openhands.llm.llm import LLM as _OHLLM
+
+        _orig_init = _OHLLM.__init__
+
+        def _patched_init(self, *args, **kwargs):
+            _orig_init(self, *args, **kwargs)
+            # Re-inject reasoning_effort if it was stripped. OpenHands has TWO
+            # completion attrs: self._completion (line 434) is wrapped with retry,
+            # and the retry wrapper internally calls self._completion_unwrapped
+            # (line 355) — so we must wrap _completion_unwrapped, not _completion.
+            if self.config.reasoning_effort and 'opus-4-6' in self.config.model:
+                _orig_unwrapped = self._completion_unwrapped
+
+                def _wrapped(*a, **kw):
+                    kw['reasoning_effort'] = self.config.reasoning_effort
+                    return _orig_unwrapped(*a, **kw)
+
+                self._completion_unwrapped = _wrapped
+
+        _OHLLM.__init__ = _patched_init
     except (ImportError, AttributeError):
         pass
 
