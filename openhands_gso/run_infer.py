@@ -93,7 +93,11 @@ def _patch_litellm():
 
         AnthropicConfig._is_claude_opus_4_5 = lambda self, model: any(
             x in model.lower()
-            for x in ("opus-4-5", "opus_4_5", "opus-4-6", "opus_4_6", "opus-4-7", "opus_4_7")
+            for x in (
+                "opus-4-5", "opus_4_5", "opus-4-6", "opus_4_6",
+                "opus-4-7", "opus_4_7", "opus-4-8", "opus_4_8",
+                "sonnet-5", "sonnet_5", "fable-5", "fable_5",
+            )
         )
         AnthropicConfig._map_reasoning_effort = staticmethod(
             lambda reasoning_effort: {"type": "adaptive"}
@@ -108,7 +112,27 @@ def _patch_litellm():
         _orig_xform = VertexAIAnthropicConfig.transform_request
 
         def _patched_xform(self, *args, **kwargs):
+            # litellm's base AnthropicConfig only allows effort in
+            # {high,medium,low} and raises ValueError otherwise. Vertex's
+            # newer models accept xhigh/max, so temporarily downgrade the
+            # effort to "high" to pass validation, then restore it on the
+            # built request.
+            optional_params = kwargs.get("optional_params")
+            if optional_params is None and len(args) >= 3:
+                optional_params = args[2]
+            _saved_effort = None
+            _oc = optional_params.get("output_config") if isinstance(optional_params, dict) else None
+            if isinstance(_oc, dict) and _oc.get("effort") in ("xhigh", "max"):
+                _saved_effort = _oc["effort"]
+                _oc["effort"] = "high"
+
             data = _orig_xform(self, *args, **kwargs)
+
+            if _saved_effort is not None:
+                if isinstance(data.get("output_config"), dict):
+                    data["output_config"]["effort"] = _saved_effort
+                if isinstance(_oc, dict):
+                    _oc["effort"] = _saved_effort  # restore caller's dict
             data.pop("anthropic_beta", None)
             # When thinking is enabled (or adaptive), Vertex Anthropic only
             # accepts temperature=1; strip temperature/top_p/top_k so the
@@ -140,11 +164,14 @@ def _patch_litellm():
     except (ImportError, AttributeError):
         pass
 
-    # 4. Un-strip reasoning_effort for opus-4.6 in OpenHands.
-    #    OpenHands 1.6.0 hardcodes a strip-list (sonnet-4.5, haiku-4.5,
-    #    opus-4.6) that drops `reasoning_effort` before the litellm call.
-    #    We've fixed the root cause (temperature conflict) in patch #3, so
-    #    re-add reasoning_effort right before the LLM call.
+    # 4. Un-strip reasoning_effort for Vertex Claude models in OpenHands.
+    #    OpenHands 1.6.0 reports supports_reasoning_effort=False for newer
+    #    Vertex Claude models (opus-4.6/4.7/4.8, sonnet-5), so it never sends
+    #    reasoning_effort at all — the whole reasoning block is skipped. It
+    #    also hardcodes a strip-list (sonnet-4.5, haiku-4.5, opus-4.6). Either
+    #    way reasoning_effort gets dropped. We've fixed the root cause
+    #    (temperature conflict, xhigh validation) in patch #3, so re-inject
+    #    reasoning_effort right before the LLM call.
     try:
         from openhands.llm.llm import LLM as _OHLLM
 
@@ -156,7 +183,7 @@ def _patch_litellm():
             # completion attrs: self._completion (line 434) is wrapped with retry,
             # and the retry wrapper internally calls self._completion_unwrapped
             # (line 355) — so we must wrap _completion_unwrapped, not _completion.
-            if self.config.reasoning_effort and 'opus-4-6' in self.config.model:
+            if self.config.reasoning_effort and 'claude' in self.config.model.lower():
                 _orig_unwrapped = self._completion_unwrapped
 
                 def _wrapped(*a, **kw):
@@ -264,7 +291,6 @@ def _initialize_runtime(mod, runtime, instance):
         return obs
 
     _run(
-        f"echo 'export GSO_INSTANCE_ID={instance['instance_id']}' >> ~/.bashrc && "
         "echo 'export PIP_CACHE_DIR=~/.cache/pip' >> ~/.bashrc && "
         "echo \"alias git='git --no-pager'\" >> ~/.bashrc",
         "Failed to set environment variables",
@@ -272,6 +298,25 @@ def _initialize_runtime(mod, runtime, instance):
     _run("""export USER=$(whoami); echo USER=${USER} """, "Failed to export USER")
     _run(r"sed -i 's#source .venv/bin/activate#\#source .venv/bin/activate#g' ~/.bashrc",
          "Failed to comment out .venv activation")
+    # Benchmark integrity: sinkhole code-hosting sites so the agent cannot
+    # look up upstream commits / reference solutions on github/gitlab/bitbucket.
+    # Applied AFTER docker-build (which already cloned the repo) and BEFORE the
+    # agent runs. Eval tests for GSO don't hit these hosts.
+    _run(
+        r"""cat >> /etc/hosts <<'EOF'
+# GSO benchmark integrity: block code-hosting sites (blocks git clone / curl of upstream refs).
+0.0.0.0 github.com
+0.0.0.0 www.github.com
+0.0.0.0 raw.githubusercontent.com
+0.0.0.0 codeload.github.com
+0.0.0.0 api.github.com
+0.0.0.0 objects.githubusercontent.com
+0.0.0.0 gitlab.com
+0.0.0.0 bitbucket.org
+0.0.0.0 sourceforge.net
+EOF""",
+        "Failed to add /etc/hosts sinkhole",
+    )
     _run("if [ -d /workspace ]; then rm -rf /workspace/*; else mkdir /workspace; fi && "
          f"mkdir -p /workspace && cp -r /testbed /workspace/{workspace_dir}",
          f"Failed to set up workspace /workspace/{workspace_dir}")
@@ -325,7 +370,14 @@ def _extract_patch(mod, runtime, instance):
     git_patch = None
     for attempt in range(5):
         t = max(300 + 100 * attempt, 600)
-        obs = _run(f"git diff --no-color --cached {base_commit} > /tmp/patch.diff", timeout=t)
+        # --submodule=diff so agent edits INSIDE submodule directories
+        # (vendor/llama.cpp, x86-simd-sort, etc.) are captured. --cached
+        # would only surface outer-repo changes and silently drop
+        # submodule content edits, making 4 GSO tasks unwinnable.
+        obs = _run(
+            f"git diff --no-color --submodule=diff {base_commit} > /tmp/patch.diff",
+            timeout=t,
+        )
         if isinstance(obs, CmdOutputObservation) and obs.exit_code == 0:
             read_action = FileReadAction(path="/tmp/patch.diff")
             read_action.set_hard_timeout(t)
@@ -411,6 +463,7 @@ def _process_instance(instance: dict, args_dict: dict) -> dict:
         enable_jupyter=False, enable_browsing=False,
         enable_llm_editor=False, enable_prompt_extensions=False,
         enable_plan_mode=False,
+        enable_mcp=False,
         condenser=mod["NoOpCondenserConfig"](),
     ))
 
@@ -509,8 +562,101 @@ def _worker_wrapper(args):
 # Main
 # ---------------------------------------------------------------------------
 
+def _setup_network_isolation():
+    """Isolate agent runtime containers to a dedicated docker network
+    with iptables egress rules blocking github/gitlab. Idempotent.
+
+    Design:
+    - Custom network `gso-runtime` (172.30.0.0/16). Agent containers get this
+      network only; docker default bridge (172.17.0.0/16) is unaffected so
+      docker BUILDS continue to work normally.
+    - Host iptables DOCKER-USER rules DROP outbound from 172.30.0.0/16 to
+      GitHub/GitLab published CIDRs. Preserves pypi + HuggingFace + everything
+      else. Agent inside the container cannot touch host iptables.
+    - Monkey-patch OpenHands docker_runtime so its runtime containers attach
+      to this network instead of the default bridge.
+
+    Runs once at scaffold startup. Requires passwordless sudo for iptables.
+    """
+    import subprocess, urllib.request, json as _json
+
+    NETWORK = "gso-runtime"
+    SUBNET = "172.30.0.0/16"
+    TAG = "GSO-BLOCK"
+
+    # 1. Create custom docker network (idempotent)
+    r = subprocess.run(
+        ["docker", "network", "inspect", NETWORK],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        r = subprocess.run(
+            ["docker", "network", "create", "--driver=bridge",
+             f"--subnet={SUBNET}", NETWORK],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            logger = logging.getLogger("run_infer")
+            logger.warning(f"could not create docker network {NETWORK}: {r.stderr}")
+            return
+
+    # 2. Fetch current blocked CIDRs (GitHub public + GitLab)
+    cidrs = set()
+    try:
+        d = _json.load(urllib.request.urlopen("https://api.github.com/meta", timeout=10))
+        for key in ("git", "web", "api"):
+            for c in d.get(key, []):
+                if ":" not in c:
+                    cidrs.add(c)
+    except Exception:
+        pass  # don't fail if github meta is unreachable
+    cidrs.update(["172.65.251.78/32", "34.74.90.64/28",
+                  "34.74.226.0/24", "35.190.223.0/24"])
+
+    # 3. Remove any prior GSO-BLOCK rules, install fresh
+    while True:
+        r = subprocess.run(
+            ["sudo", "iptables", "-L", "DOCKER-USER", "--line-numbers", "-n"],
+            capture_output=True, text=True,
+        )
+        line = next((l for l in r.stdout.splitlines() if TAG in l), None)
+        if not line:
+            break
+        ln = line.split()[0]
+        subprocess.run(["sudo", "iptables", "-D", "DOCKER-USER", ln], check=False)
+
+    for cidr in sorted(cidrs):
+        subprocess.run(
+            ["sudo", "iptables", "-I", "DOCKER-USER",
+             "-s", SUBNET, "-d", cidr, "-j", "DROP",
+             "-m", "comment", "--comment", TAG],
+            check=False,
+        )
+
+    # 4. Monkey-patch docker-py so OpenHands runtime containers attach to
+    #    the isolated network instead of the default bridge. We match by
+    #    container name prefix ('openhands-runtime-') as set by OpenHands 1.6
+    #    in openhands.runtime.impl.docker.docker_runtime.
+    try:
+        from docker.models.containers import ContainerCollection  # type: ignore
+    except Exception:
+        return
+    if not getattr(ContainerCollection.run, "_gso_patched", False):
+        _orig_run = ContainerCollection.run
+
+        def _patched_run(self, image, *args, **kwargs):
+            name = kwargs.get("name") or ""
+            if name.startswith("openhands-runtime-") and kwargs.get("network_mode") != "host":
+                kwargs["network_mode"] = NETWORK
+            return _orig_run(self, image, *args, **kwargs)
+
+        _patched_run._gso_patched = True  # type: ignore[attr-defined]
+        ContainerCollection.run = _patched_run  # type: ignore[method-assign]
+
+
 def main() -> int:
     _patch_litellm()
+    _setup_network_isolation()
     mod = require_openhands()
 
     parser = argparse.ArgumentParser(description="Run OpenHands on GSO to produce patches.")
