@@ -59,3 +59,7 @@ Thumbs.db
 config.toml
 *.log
 run.sh
+
+# Local configuration and runtime hooks
+config.middleman.toml
+ohpatch/

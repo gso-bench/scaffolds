@@ -91,6 +91,15 @@ _FATAL_ERROR_NAMES = [
     "AgentRuntimeDisconnectedError",
     "AgentRuntimeNotFoundError",
     "ConnectionError",
+    # LLM transport failures: the LLM-level retry window was exhausted (upstream outage).
+    # Re-run the instance from scratch rather than recording a silent zero.
+    "ERROR_LLM_SERVICE_UNAVAILABLE",
+    "ERROR_LLM_INTERNAL_SERVER_ERROR",
+    "APIConnectionError",
+    "ServiceUnavailableError",
+    "BadGatewayError",
+    "InternalServerError",
+    "APIError",
 ]
 
 
