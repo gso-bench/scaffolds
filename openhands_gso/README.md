@@ -11,6 +11,7 @@ cp openhands_gso/config.example.toml ./config.toml
 # run one instance
 uv run \
   --with "openhands-ai @ git+https://github.com/OpenHands/OpenHands.git@1.3.0" \
+  --with "mcp<2" \
   --project . \
   python -m openhands_gso.run_infer \
     --llm-config llm.test \

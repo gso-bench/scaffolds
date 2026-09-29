@@ -68,7 +68,8 @@ Use this when you want to run OpenHands directly, but still be able to **pin any
 Example: pin OpenHands v1.3.0
 ```bash
 uv run \
-  --with "openhands-ai @ git+https://github.com/All-Hands-AI/OpenHands.git@v1.3.0" \
+  --with "openhands-ai @ git+https://github.com/OpenHands/OpenHands.git@1.3.0" \
+  --with "mcp<2" \
   --project . \
   gso-openhands --help
 ```

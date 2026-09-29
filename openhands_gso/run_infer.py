@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
+import functools
 import json
 import logging
 import multiprocessing as mp
@@ -16,6 +18,7 @@ import os
 import signal
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 from datasets import load_dataset
 
@@ -37,10 +40,60 @@ from openhands_gso.helpers import (
 
 TIMEOUT_SECONDS = 3 * 60 * 60  # 3 hours per instance
 MAX_RETRIES = 3
+_LITELLM_PATCHED = False
+
+
+@contextmanager
+def _runtime_startup_slot():
+    """Bound Docker builds and startup across workers, without limiting agents."""
+    slots = int(os.environ.get("GSO_RUNTIME_STARTUP_WORKERS", "4"))
+    if slots < 1:
+        raise ValueError("GSO_RUNTIME_STARTUP_WORKERS must be positive")
+    lock_dir = Path(os.environ.get(
+        "GSO_RUNTIME_LOCK_DIR", f"/tmp/gso-runtime-startup-{os.getuid()}"
+    ))
+    lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    while True:
+        for slot in range(slots):
+            with (lock_dir / f"{slot}.lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                return
+        time.sleep(0.2)
+
+
+def _configure_docker_timeout():
+    """Allow busy Docker filesystem operations more than the SDK's 60 seconds."""
+    import docker
+
+    if getattr(docker.from_env, "_gso_timeout", False):
+        return
+    original = docker.from_env
+
+    @functools.wraps(original)
+    def from_env(**kwargs):
+        kwargs.setdefault("timeout", int(os.environ.get("GSO_DOCKER_TIMEOUT", "600")))
+        return original(**kwargs)
+
+    from_env._gso_timeout = True
+    docker.from_env = from_env
 
 
 def _patch_litellm():
     """Apply litellm compatibility patches for newer model APIs."""
+    global _LITELLM_PATCHED
+    if _LITELLM_PATCHED:
+        return
+
+    from openhands_gso.model_compat import install_model_compatibility
+
+    install_model_compatibility()
     # 1. Allow reasoning_effort='xhigh' for gpt-5.4+
     #    litellm < 1.83 only allowlists gpt-5.1-codex-max and gpt-5.2 for xhigh.
     try:
@@ -196,6 +249,8 @@ def _patch_litellm():
     except (ImportError, AttributeError):
         pass
 
+    _LITELLM_PATCHED = True
+
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +312,17 @@ def _build_instruction(instance: dict) -> str:
         "Make general performance improvements for the usage scenario shown.\n"
         "   4. You may need to rebuild the repo for your changes to take effect before testing. "
         "Some rebuilds may take time to run, so be patient with running them.\n"
+        "   5. Please attempt this without taking shortcuts or cheating like looking up "
+        "solutions online or in git history. This is real coding work and your changes will be manually "
+        "reviewed by a human.\n"
+        "   6. The <test_script> shown is ONE example. Your change will be evaluated on many "
+        "different workloads exercising the same API, with varied inputs, dtypes and shapes. "
+        "A fast path that only covers the exact inputs above will score as a failure -- optimise "
+        "the general case.\n"
+        "   7. Your work is measured against a human expert's optimisation of this same code, and "
+        "matching it is the bar. A speedup that works is not the goal. After each improvement, measure "
+        "it, then keep looking for further gains -- deeper algorithmic changes usually beat local ones. "
+        "You have a large iteration budget; do not stop at your first working result.\n"
         "\nFollow these steps to improve performance:\n"
         "1. As a first step, it might be a good idea to explore the repo to familiarize yourself "
         "with its structure.\n"
@@ -407,6 +473,8 @@ def _extract_patch(mod, runtime, instance):
 
 def _process_instance(instance: dict, args_dict: dict) -> dict:
     """Run one GSO instance end-to-end. Returns result dict."""
+    _configure_docker_timeout()
+    _patch_litellm()
     mod = require_openhands()
     logger = mod["logger"]
     instance_id = instance["instance_id"]
@@ -467,10 +535,11 @@ def _process_instance(instance: dict, args_dict: dict) -> dict:
         condenser=mod["NoOpCondenserConfig"](),
     ))
 
-    runtime = mod["create_runtime"](config)
-    mod["call_async_from_sync"](runtime.connect)
-
+    runtime = None
     try:
+        with _runtime_startup_slot():
+            runtime = mod["create_runtime"](config)
+            mod["call_async_from_sync"](runtime.connect)
         _initialize_runtime(mod, runtime, instance)
         instruction = _build_instruction(instance)
         state = asyncio.run(
@@ -485,7 +554,11 @@ def _process_instance(instance: dict, args_dict: dict) -> dict:
             raise RuntimeError(f"Fatal error detected: {state.last_error}")
         git_patch = _extract_patch(mod, runtime, instance)
     finally:
-        runtime.close()
+        if runtime is not None:
+            try:
+                runtime.close()
+            except Exception:
+                logger.warning("Runtime cleanup failed; preserving the instance result", exc_info=True)
 
     # Build result
     history = [mod["event_to_dict"](event) for event in state.history] if state else None
@@ -655,6 +728,7 @@ def _setup_network_isolation():
 
 
 def main() -> int:
+    _configure_docker_timeout()
     _patch_litellm()
     _setup_network_isolation()
     mod = require_openhands()
